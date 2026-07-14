@@ -7,6 +7,7 @@ from typing import Dict, Any
 from .manager import lib_logger
 from ..utils.json_utils import json_loads, json_deep_copy
 from ..batched_persistence import UsagePersistenceManager
+import asyncio
 import aiofiles
 import json
 import os
@@ -116,6 +117,15 @@ class UsageManagerPersistenceMixin:
             await self._load_usage()
             await self._reset_daily_stats_if_needed()
             self._initialized.set()
+
+    async def close(self) -> None:
+        """Flush and stop usage persistence owned by this manager."""
+        if self._batch_persistence is not None:
+            await self._batch_persistence.shutdown()
+            self._batch_persistence = None
+            return
+
+        await asyncio.to_thread(self._state_writer.shutdown)
 
 
 
@@ -792,4 +802,3 @@ class UsageManagerResetMixin:
                 )
         else:
             data["key_cooldown_until"] = None
-

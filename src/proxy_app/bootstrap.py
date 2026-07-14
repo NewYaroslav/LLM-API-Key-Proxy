@@ -137,6 +137,29 @@ def log_startup_banner(args: argparse.Namespace, elapsed: float | None = None) -
         logger.info("Server ready in %.2fs", elapsed)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _rotating_file_handler(
+    path: Path,
+    *,
+    max_bytes_env: str,
+    default_max_bytes: int,
+    backup_count_env: str,
+    default_backup_count: int,
+) -> logging.Handler:
+    return logging.handlers.RotatingFileHandler(
+        path,
+        maxBytes=max(1, _env_int(max_bytes_env, default_max_bytes)),
+        backupCount=max(1, _env_int(backup_count_env, default_backup_count)),
+        encoding="utf-8",
+    )
+
+
 def configure_logging(root_dir: Path) -> None:
     import colorlog
     import litellm  # type: ignore[import-untyped]
@@ -146,7 +169,13 @@ def configure_logging(root_dir: Path) -> None:
 
     log_dir = get_logs_dir(root_dir)
 
-    info_file_handler = logging.FileHandler(log_dir / "proxy.log", encoding="utf-8")
+    info_file_handler = _rotating_file_handler(
+        log_dir / "proxy.log",
+        max_bytes_env="PROXY_LOG_MAX_BYTES",
+        default_max_bytes=20 * 1024 * 1024,
+        backup_count_env="PROXY_LOG_BACKUP_COUNT",
+        default_backup_count=5,
+    )
     info_file_handler.setLevel(logging.INFO)
     info_file_handler.setFormatter(
         logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -159,7 +188,13 @@ def configure_logging(root_dir: Path) -> None:
     info_queue_listener.start()
     atexit.register(info_queue_listener.stop)
 
-    debug_file_handler = logging.FileHandler(log_dir / "proxy_debug.log", encoding="utf-8")
+    debug_file_handler = _rotating_file_handler(
+        log_dir / "proxy_debug.log",
+        max_bytes_env="PROXY_DEBUG_LOG_MAX_BYTES",
+        default_max_bytes=50 * 1024 * 1024,
+        backup_count_env="PROXY_DEBUG_LOG_BACKUP_COUNT",
+        default_backup_count=3,
+    )
     debug_file_handler.setLevel(logging.DEBUG)
     debug_file_handler.setFormatter(
         logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")

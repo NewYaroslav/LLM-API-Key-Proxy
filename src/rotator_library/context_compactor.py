@@ -70,7 +70,7 @@ class ContextCompactor:
         context_window: int,
         model: str,
     ) -> dict:
-        """Return a COPY of request_data with compacted messages.
+        """Return request_data unchanged or a copy with compacted messages.
 
         Args:
             request_data: Original request payload (never mutated).
@@ -78,17 +78,16 @@ class ContextCompactor:
             model: Model identifier for token counting.
 
         Returns:
-            Deep copy of request_data with messages compacted to fit.
+            Original request_data when no compaction is needed, otherwise a
+            deep copy with messages compacted to fit.
 
         Raises:
             ContextOverflowError: If messages still exceed threshold after
                 all compaction phases.
         """
-        # Deep copy — never mutate caller's data
-        result = copy.deepcopy(request_data)
-        messages: list = result.get("messages", [])
+        messages: list = request_data.get("messages", [])
         if not messages:
-            return result
+            return request_data
 
         token_limit = int(context_window * self.config.threshold)
         current_tokens = self._count_tokens(messages, model)
@@ -101,7 +100,11 @@ class ContextCompactor:
 
         if current_tokens <= token_limit:
             logger.debug("Context compaction: no compaction needed")
-            return result
+            return request_data
+
+        # Deep copy only when compacting; caller data is never mutated.
+        result = copy.deepcopy(request_data)
+        messages = result.get("messages", [])
 
         # --- Phase 1: Drop nudge system messages ---
         messages = self._phase1_drop_nudges(messages)

@@ -150,10 +150,29 @@ async def init_model_info():
     return await init_model_info_service()
 
 
-async def _safe_close_async(coro_fn, label: str) -> None:
+def _shutdown_step_timeout() -> float:
+    try:
+        return float(os.getenv("SHUTDOWN_STEP_TIMEOUT", "5"))
+    except ValueError:
+        return 5.0
+
+
+async def _safe_await(coro, label: str, timeout: float | None = None) -> None:
+    """Await a shutdown coroutine with a bounded timeout."""
+    try:
+        await asyncio.wait_for(coro, timeout=timeout or _shutdown_step_timeout())
+    except asyncio.TimeoutError:
+        logger.warning("Timed out while closing %s; continuing shutdown", label)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("Error closing %s: %s", label, e)
+
+
+async def _safe_close_async(coro_fn, label: str, timeout: float | None = None) -> None:
     """Safely call an async close method, logging errors without propagating."""
     try:
-        await coro_fn()
+        await _safe_await(coro_fn(), label, timeout=timeout)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -536,12 +555,18 @@ def create_lifespan(config: LifespanConfig) -> Callable[[FastAPI], AsyncContextM
                     "Error waiting for active streams during shutdown: %s", e
                 )
 
-            await client.background_refresher.stop()  # Stop the background task on shutdown
-            close_doh_client()  # Close persistent DoH httpx.Client
-            close_dns_executor()  # Shutdown DNS thread pool
+            # Stop background/network resources with bounded waits so a stuck
+            # provider cleanup cannot keep the process half-alive after Ctrl+C.
+            await _safe_await(
+                client.background_refresher.stop(), "background refresher"
+            )
+            _safe_close_sync(close_doh_client, "DoH client")
+            _safe_close_sync(close_dns_executor, "DNS executor")
             if app.state.embedding_batcher:
-                await app.state.embedding_batcher.stop()
-            await client.close()  # Also calls close_http_pool()
+                await _safe_await(
+                    app.state.embedding_batcher.stop(), "embedding batcher"
+                )
+            await _safe_await(client.close(), "rotating client")
 
             # Close litellm's internal aiohttp/httpx sessions to prevent
             # "Unclosed client session" warnings on shutdown
@@ -590,7 +615,9 @@ def create_lifespan(config: LifespanConfig) -> Callable[[FastAPI], AsyncContextM
                 hasattr(app.state, "model_info_service")
                 and app.state.model_info_service
             ):
-                await app.state.model_info_service.stop()
+                await _safe_await(
+                    app.state.model_info_service.stop(), "model info service"
+                )
 
             if app.state.embedding_batcher:
                 logger.info("RotatingClient and EmbeddingBatcher closed.")

@@ -12,6 +12,7 @@ This module calculates balanced max_tokens values based on:
 
 import functools
 import logging
+import os
 import re
 from typing import Dict, Any, Optional, Tuple
 
@@ -20,6 +21,13 @@ from .utils.json_utils import json_dumps_str
 from litellm.litellm_core_utils.token_counter import token_counter  # type: ignore[import-untyped]
 
 logger = logging.getLogger("rotator_library")
+
+try:
+    EXACT_TOKEN_COUNTER_MAX_CHARS = int(
+        os.getenv("EXACT_TOKEN_COUNTER_MAX_CHARS", "250000")
+    )
+except ValueError:
+    EXACT_TOKEN_COUNTER_MAX_CHARS = 250000
 
 # Models that require `max_completion_tokens` exclusively — sending both
 # `max_tokens` and `max_completion_tokens` produces an upstream 400.
@@ -214,6 +222,74 @@ def get_context_window(model: str, registry=None) -> Optional[int]:
     return None
 
 
+def _estimate_text_tokens(text: str) -> int:
+    """Fast local token estimate used when exact tokenizers are too expensive."""
+    if not text:
+        return 0
+
+    ascii_chars = 0
+    non_ascii_chars = 0
+    for ch in text:
+        if ord(ch) < 128:
+            ascii_chars += 1
+        else:
+            non_ascii_chars += 1
+
+    # ASCII text is usually ~4 chars/token; non-ASCII often trends closer to
+    # 1 char/token. This intentionally errs on the conservative side.
+    return max(1, (ascii_chars + 3) // 4 + non_ascii_chars)
+
+
+def _estimate_value_tokens(value: Any) -> tuple[int, int]:
+    """Return (approx_tokens, approx_chars) for nested JSON-like payloads."""
+    if value is None:
+        return 0, 0
+    if isinstance(value, str):
+        return _estimate_text_tokens(value), len(value)
+    if isinstance(value, (int, float, bool)):
+        text = str(value)
+        return _estimate_text_tokens(text), len(text)
+    if isinstance(value, dict):
+        tokens = 4
+        chars = 0
+        for key, item in value.items():
+            key_tokens, key_chars = _estimate_value_tokens(key)
+            item_tokens, item_chars = _estimate_value_tokens(item)
+            tokens += key_tokens + item_tokens + 2
+            chars += key_chars + item_chars
+        return tokens, chars
+    if isinstance(value, (list, tuple)):
+        tokens = 2
+        chars = 0
+        for item in value:
+            item_tokens, item_chars = _estimate_value_tokens(item)
+            tokens += item_tokens + 1
+            chars += item_chars
+        return tokens, chars
+
+    text = str(value)
+    return _estimate_text_tokens(text), len(text)
+
+
+def estimate_input_tokens(
+    messages: Optional[list] = None,
+    tools: Optional[list] = None,
+    tool_choice: Optional[Any] = None,
+) -> tuple[int, int]:
+    """Cheap token estimate for request sizing.
+
+    Returns:
+        Tuple of (estimated_tokens, estimated_chars).
+    """
+    tokens = 0
+    chars = 0
+    for value in (messages, tools, tool_choice):
+        value_tokens, value_chars = _estimate_value_tokens(value)
+        tokens += value_tokens
+        chars += value_chars
+    return tokens, chars
+
+
 def count_input_tokens(
     messages: list,
     model: str,
@@ -233,6 +309,22 @@ def count_input_tokens(
         Total input token count
     """
     total = 0
+    message_estimate, message_chars = estimate_input_tokens(messages=messages)
+    tool_estimate, tool_chars = estimate_input_tokens(
+        tools=tools, tool_choice=tool_choice
+    )
+    estimated_tokens = message_estimate + tool_estimate
+    estimated_chars = message_chars + tool_chars
+
+    if estimated_chars > EXACT_TOKEN_COUNTER_MAX_CHARS:
+        logger.debug(
+            "Using approximate token count for large payload: model=%s chars=%d tokens~=%d threshold=%d",
+            model,
+            estimated_chars,
+            estimated_tokens,
+            EXACT_TOKEN_COUNTER_MAX_CHARS,
+        )
+        return estimated_tokens
 
     # Count message tokens
     if messages:
@@ -240,8 +332,7 @@ def count_input_tokens(
             total += token_counter(model=model, messages=messages)
         except (ValueError, TypeError, KeyError) as e:
             logger.warning(f"Failed to count message tokens: {e}")
-            # Fallback: rough estimate
-            total += sum(len(str(m).split()) * 4 // 3 for m in messages)
+            total += message_estimate
 
     # Count tool definition tokens
     if tools:
@@ -250,8 +341,7 @@ def count_input_tokens(
             total += token_counter(model=model, text=tools_json)
         except (ValueError, TypeError, KeyError) as e:
             logger.debug(f"Failed to count tool tokens: {e}")
-            # Fallback: rough estimate
-            total += len(str(tools)) // 4
+            total += tool_estimate
 
     return total
 

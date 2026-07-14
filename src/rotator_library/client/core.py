@@ -419,6 +419,8 @@ class RotatingClient(
         RotatingClient instances.  Pool lifecycle is managed via
         close_http_pool() during application shutdown.
         """
+        if hasattr(self, "usage_manager") and hasattr(self.usage_manager, "close"):
+            await self.usage_manager.close()
         await close_http_pool()
         self._http_pool = None
         self._pool_initialized = False
@@ -780,6 +782,5 @@ class RotatingClient(
         request: "AnthropicCountTokensRequest",
     ) -> dict:
         return await self.anthropic_adapter.anthropic_count_tokens(request)
-
 
 
