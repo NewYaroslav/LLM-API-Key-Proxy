@@ -134,15 +134,79 @@ def _strip_minimax_separators(text: str) -> str:
     return text.replace(_MINIMAX_SEPARATOR_LONG, "").replace(_MINIMAX_SEPARATOR, "")
 
 
-def _coerce_tool_value(value: str) -> Any:
-    # Minimax text-form tool calls do not include the original JSON Schema, so
-    # heuristic coercion can corrupt string IDs, leading zero codes, and string
-    # flags such as "true" or "null". Preserve values as strings.
+def build_tool_schema_map(openai_tools: Optional[list]) -> dict[str, dict]:
+    """Build a function-name -> JSON Schema map from OpenAI-format tools."""
+    schema_map: dict[str, dict] = {}
+    if not openai_tools:
+        return schema_map
+
+    for tool in openai_tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            function = tool
+        name = function.get("name")
+        schema = (
+            function.get("parameters")
+            or function.get("input_schema")
+            or tool.get("parameters")
+            or tool.get("input_schema")
+        )
+        if isinstance(name, str) and name and isinstance(schema, dict):
+            schema_map[name] = schema
+    return schema_map
+
+
+def _schema_type(schema: Optional[dict]) -> Optional[str]:
+    if not isinstance(schema, dict):
+        return None
+    schema_type = schema.get("type")
+    if isinstance(schema_type, str):
+        return schema_type
+    if isinstance(schema_type, list):
+        non_null = [item for item in schema_type if item != "null"]
+        if len(non_null) == 1 and isinstance(non_null[0], str):
+            return non_null[0]
+    return None
+
+
+def _coerce_tool_value(value: str, schema: Optional[dict] = None) -> Any:
+    schema_type = _schema_type(schema)
+    if schema_type in (None, "string"):
+        return value
+
+    stripped = value.strip()
+    try:
+        if schema_type == "integer":
+            if re.fullmatch(r"[+-]?\d+", stripped):
+                return int(stripped)
+            return value
+        if schema_type == "number":
+            parsed = json_loads(stripped)
+            if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+                return parsed
+            return value
+        if schema_type == "boolean":
+            lowered = stripped.lower()
+            if lowered == "true":
+                return True
+            if lowered == "false":
+                return False
+            return value
+        if schema_type == "array":
+            parsed = json_loads(stripped)
+            return parsed if isinstance(parsed, list) else value
+        if schema_type == "object":
+            parsed = json_loads(stripped)
+            return parsed if isinstance(parsed, dict) else value
+    except (ValueError, TypeError):
+        return value
     return value
 
 
 class MiniMaxTextToolCallParser:
-    __slots__ = ("enabled", "pending", "in_tool_call", "_next_index")
+    __slots__ = ("enabled", "pending", "in_tool_call", "_next_index", "tool_schemas")
 
     """Recover MiniMax text-form tool calls from streamed content."""
 
@@ -153,11 +217,12 @@ class MiniMaxTextToolCallParser:
         len("<invoke name=\""),
     ) - 1
 
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool, tool_schemas: Optional[dict[str, dict]] = None):
         self.enabled = enabled
         self.pending = ""
         self.in_tool_call = False
         self._next_index = 0
+        self.tool_schemas = tool_schemas or {}
 
     @staticmethod
     def _suffix_prefix_len(text: str) -> int:
@@ -217,10 +282,17 @@ class MiniMaxTextToolCallParser:
 
         body = raw[match.end():end_idx]
         arguments: dict[str, Any] = {}
+        tool_schema = self.tool_schemas.get(name) or {}
+        properties = (
+            tool_schema.get("properties", {})
+            if isinstance(tool_schema, dict)
+            else {}
+        )
         for param in _PARAM_RE.finditer(body):
             key = html.unescape(param.group("name"))
             value = html.unescape(self._clean_text(param.group("value")))
-            arguments[key] = _coerce_tool_value(value)
+            param_schema = properties.get(key) if isinstance(properties, dict) else None
+            arguments[key] = _coerce_tool_value(value, param_schema)
 
         return self._make_tool_call(name, arguments)
 
@@ -562,6 +634,7 @@ class _StreamTranslator:
         transaction_logger: Optional["TransactionLogger"],
         precomputed_input_tokens: Optional[int],
         cache_control_map: Optional[dict] = None,
+        tool_schemas: Optional[dict[str, dict]] = None,
     ):
         self.request_id = request_id
         self.original_model = original_model
@@ -591,7 +664,10 @@ class _StreamTranslator:
         self._chunk_count = 0
         self._cache_control_map = cache_control_map or {}
         self._think_tag_parser = ThinkTagParser(_should_parse_think_tags(original_model))
-        self._text_tool_parser = MiniMaxTextToolCallParser(_should_parse_text_tool_calls(original_model))
+        self._text_tool_parser = MiniMaxTextToolCallParser(
+            _should_parse_text_tool_calls(original_model),
+            tool_schemas=tool_schemas,
+        )
 
     # ------------------------------------------------------------------
     # Chunk parsing
@@ -745,7 +821,9 @@ class _StreamTranslator:
         for field, value in segments:
             if field == "tool_call":
                 events.extend(self._emit_content_segments(self._think_tag_parser.flush(), current_time))
-                events.extend(self._emit_structured_tool_calls([value], current_time))
+                namespaced_value = dict(value)
+                namespaced_value["index"] = ("text", value.get("index", 0))
+                events.extend(self._emit_structured_tool_calls([namespaced_value], current_time))
             else:
                 events.extend(self._emit_content_segments(
                     self._think_tag_parser.feed(value),
@@ -861,7 +939,7 @@ class _StreamTranslator:
                 yield event
             self.current_block_index += 1
 
-        for tc_index in sorted(self.tool_block_indices.keys()):
+        for tc_index in sorted(self.tool_block_indices.keys(), key=repr):
             block_idx = self.tool_block_indices[tc_index]
             event_str = _make_content_block_stop_event(block_idx)
             if event := batch_add(event_str):
@@ -1013,6 +1091,7 @@ async def anthropic_streaming_wrapper_fast(
     transaction_logger: Optional["TransactionLogger"] = None,
     precomputed_input_tokens: Optional[int] = None,
     cache_control_map: Optional[dict] = None,
+    tool_schemas: Optional[dict[str, dict]] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Convert OpenAI streaming format to Anthropic streaming format (optimized version).
@@ -1041,6 +1120,8 @@ async def anthropic_streaming_wrapper_fast(
         cache_control_map: Optional mapping of content block index to cache_control dict.
             Used to restore cache_control metadata in streaming content_block_start events,
             mirroring the cache_control sent in the original Anthropic request.
+        tool_schemas: Optional function-name -> input JSON Schema map for schema-aware
+            recovery of MiniMax text-form tool calls.
 
     Yields:
         SSE format strings in Anthropic's streaming format
@@ -1055,6 +1136,7 @@ async def anthropic_streaming_wrapper_fast(
         transaction_logger=transaction_logger,
         precomputed_input_tokens=precomputed_input_tokens,
         cache_control_map=cache_control_map,
+        tool_schemas=tool_schemas,
     )
     async for event in translator.translate(openai_stream):
         yield event
@@ -1090,7 +1172,7 @@ async def _log_anthropic_response(
         })
 
     # Add tool use blocks
-    for tc_index in sorted(tool_calls_by_index):
+    for tc_index in sorted(tool_calls_by_index, key=repr):
         tc = tool_calls_by_index[tc_index]
         try:
             chunks = tc.get("chunks")

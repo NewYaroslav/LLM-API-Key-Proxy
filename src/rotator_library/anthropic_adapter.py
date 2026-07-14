@@ -49,9 +49,10 @@ class AnthropicAdapter:
             translate_anthropic_request,
             openai_to_anthropic_response,
             anthropic_streaming_wrapper,
+            build_tool_schema_map,
             TranslationAuditLog,
         )
-        from .token_calculator import count_input_tokens
+        from .token_calculator import count_input_tokens_result
         import uuid
 
         request_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -91,6 +92,8 @@ class AnthropicAdapter:
         # _cache_control_metadata is preserved in messages for round-trip fidelity
         openai_request.pop("_translation_audit", None)
 
+        tool_schemas = build_tool_schema_map(openai_request.get("tools"))
+
         # Pass parent log directory to acompletion for nested logging
         if anthropic_logger and anthropic_logger.log_dir:
             openai_request["_parent_log_dir"] = anthropic_logger.log_dir
@@ -111,15 +114,19 @@ class AnthropicAdapter:
                 tools = openai_request.get("tools")
                 tool_choice = openai_request.get("tool_choice")
                 if messages:
-                    precomputed_input_tokens = count_input_tokens(
+                    token_count = count_input_tokens_result(
                         messages=messages,
                         model=original_model,
                         tools=tools,
                         tool_choice=tool_choice,
+                        allow_timed_exact=True,
                     )
+                    precomputed_input_tokens = token_count.count
                     lib_logger.log(
                         TRACE,
-                        f"Pre-computed input tokens for {original_model}: {precomputed_input_tokens}"
+                        "Pre-computed input tokens for "
+                        f"{original_model}: {precomputed_input_tokens} "
+                        f"(exact={token_count.exact}, reason={token_count.reason})"
                     )
             except (ValueError, TypeError, Exception) as e:
                 lib_logger.warning(f"Failed to pre-compute input tokens: {e}")
@@ -150,6 +157,7 @@ class AnthropicAdapter:
                 transaction_logger=anthropic_logger,
                 precomputed_input_tokens=precomputed_input_tokens,
                 cache_control_map=cache_control_map if cache_control_map else None,
+                tool_schemas=tool_schemas,
             )
         else:
             # Non-streaming response
@@ -167,7 +175,9 @@ class AnthropicAdapter:
                 else dict(response)
             )
             anthropic_response = openai_to_anthropic_response(
-                openai_response, original_model
+                openai_response,
+                original_model,
+                tool_schemas=tool_schemas,
             )
 
             # Override the ID with our request ID

@@ -32,7 +32,7 @@ from .translator import (
     translate_anthropic_request,
 )
 
-from .streaming_fast import anthropic_streaming_wrapper
+from .streaming_fast import anthropic_streaming_wrapper, build_tool_schema_map
 from .translation_audit import TranslationAuditLog
 
 __all__ = [
@@ -49,6 +49,7 @@ __all__ = [
     "translate_anthropic_request",
     # Streaming
     "anthropic_streaming_wrapper",
+    "build_tool_schema_map",
     # Audit
     "TranslationAuditLog",
 ]

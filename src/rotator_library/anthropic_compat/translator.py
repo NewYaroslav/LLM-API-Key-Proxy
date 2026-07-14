@@ -540,13 +540,19 @@ def _openai_tool_call_to_anthropic_block(tc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model: str) -> Dict[str, Any]:
+def openai_to_anthropic_response(
+    openai_response: Dict[str, Any],
+    original_model: str,
+    tool_schemas: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Convert OpenAI chat completion response to Anthropic Messages format.
 
     Args:
         openai_response: Response from OpenAI-compatible API
         original_model: The model name requested by the client
+        tool_schemas: Optional function-name -> input JSON Schema map for
+            schema-aware recovery of MiniMax text-form tool calls.
 
     Returns:
         Response in Anthropic Messages format
@@ -577,12 +583,16 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model
         )
 
     recovered_tool_call_seen = False
+    tool_calls: List[Dict[str, Any]] = message.get("tool_calls") or []
 
     # Add text content if present
     text_content: Optional[str] = message.get("content")
     if text_content:
         if _should_parse_text_tool_calls(original_model):
-            tool_parser = MiniMaxTextToolCallParser(enabled=True)
+            tool_parser = MiniMaxTextToolCallParser(
+                enabled=True,
+                tool_schemas=tool_schemas,
+            )
             think_parser = ThinkTagParser(enabled=_should_parse_think_tags(original_model))
             for field, value in tool_parser.feed(text_content, final=True):
                 if field == "tool_call":
@@ -593,8 +603,9 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model
                             content_blocks.append({"type": "thinking", "thinking": sub_text})
                         else:
                             content_blocks.append({"type": "text", "text": sub_text})
-                    content_blocks.append(_openai_tool_call_to_anthropic_block(value))
-                    recovered_tool_call_seen = True
+                    if not tool_calls:
+                        content_blocks.append(_openai_tool_call_to_anthropic_block(value))
+                        recovered_tool_call_seen = True
                     continue
                 for sub_field, sub_text in think_parser.feed(value):
                     if not sub_text:
@@ -623,7 +634,6 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model
             content_blocks.append({"type": "text", "text": text_content})
 
     # Add structured tool use blocks if present.
-    tool_calls: List[Dict[str, Any]] = message.get("tool_calls") or []
     for tc in tool_calls:
         content_blocks.append(_openai_tool_call_to_anthropic_block(tc))
 

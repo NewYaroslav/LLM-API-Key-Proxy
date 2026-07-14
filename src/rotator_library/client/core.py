@@ -448,7 +448,11 @@ class RotatingClient(
             COMPACTION_KEEP_RECENT_ASSISTANT,
         )
         from ..context_compactor import CompactionConfig, ContextCompactor
-        from ..token_calculator import count_input_tokens, get_context_window
+        from ..token_calculator import (
+            count_input_tokens_result,
+            estimate_input_tokens,
+            get_context_window,
+        )
 
         # Determine if compaction is requested
         header_value = None
@@ -481,15 +485,66 @@ class RotatingClient(
             keep_recent_assistant=COMPACTION_KEEP_RECENT_ASSISTANT,
         )
 
-        def _counter(msgs: list, mdl: str) -> int:
-            return count_input_tokens(msgs, mdl)
-
-        compactor = ContextCompactor(config=config, token_counter=_counter)
         # Build a minimal request_data dict for the compactor
         request_data = {"messages": messages}
         tools = kwargs.get("tools")
         if tools:
             request_data["tools"] = tools
+
+        token_limit = int(context_window * config.threshold)
+        estimated_tokens, estimated_bytes = estimate_input_tokens(
+            messages=messages,
+            tools=tools,
+            tool_choice=kwargs.get("tool_choice"),
+        )
+        if estimated_tokens <= token_limit:
+            lib_logger.debug(
+                "Context compaction skipped: estimate fits model=%s tokens~=%d "
+                "limit=%d bytes=%d",
+                model,
+                estimated_tokens,
+                token_limit,
+                estimated_bytes,
+            )
+            return
+
+        token_count = count_input_tokens_result(
+            messages=messages,
+            model=model,
+            tools=tools,
+            tool_choice=kwargs.get("tool_choice"),
+            allow_timed_exact=True,
+        )
+        if not token_count.exact:
+            lib_logger.warning(
+                "Context compaction skipped: exact token count unavailable for "
+                "model=%s tokens~=%d limit=%d bytes=%d reason=%s",
+                model,
+                token_count.count,
+                token_limit,
+                token_count.measured_bytes,
+                token_count.reason,
+            )
+            return
+        if token_count.count <= token_limit:
+            lib_logger.debug(
+                "Context compaction skipped: exact count fits model=%s tokens=%d "
+                "limit=%d",
+                model,
+                token_count.count,
+                token_limit,
+            )
+            return
+
+        def _counter(msgs: list, mdl: str) -> int:
+            count = count_input_tokens_result(
+                msgs,
+                mdl,
+                allow_timed_exact=True,
+            )
+            return count.count
+
+        compactor = ContextCompactor(config=config, token_counter=_counter)
 
         compacted = compactor.compact(
             request_data,
@@ -784,4 +839,3 @@ class RotatingClient(
         request: "AnthropicCountTokensRequest",
     ) -> dict:
         return await self.anthropic_adapter.anthropic_count_tokens(request)
-

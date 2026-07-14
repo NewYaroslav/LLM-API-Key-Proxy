@@ -120,6 +120,15 @@ class MinimaxAnthropicStreamingTests(unittest.IsolatedAsyncioTestCase):
                 openai_stream=openai_stream(),
                 original_model="minimax/MiniMax-M3",
                 request_id="msg_test",
+                tool_schemas={
+                    "Read": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "limit": {"type": "integer"},
+                        },
+                    }
+                },
             )
         ]
 
@@ -148,7 +157,7 @@ class MinimaxAnthropicStreamingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             json_loads(args_delta),
-            {"file_path": "e:\\repo\\note.md", "limit": "25"},
+            {"file_path": "e:\\repo\\note.md", "limit": 25},
         )
 
         stop_reason = next(
@@ -243,6 +252,15 @@ class MinimaxAnthropicStreamingTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
             "minimax/MiniMax-M3",
+            tool_schemas={
+                "Read": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                }
+            },
         )
 
         self.assertEqual(response["stop_reason"], "tool_use")
@@ -251,7 +269,7 @@ class MinimaxAnthropicStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["content"][1]["name"], "Read")
         self.assertEqual(
             response["content"][1]["input"],
-            {"file_path": "e:\\repo\\note.md", "limit": "25"},
+            {"file_path": "e:\\repo\\note.md", "limit": 25},
         )
 
 
