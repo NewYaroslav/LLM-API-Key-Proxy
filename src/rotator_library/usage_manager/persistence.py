@@ -7,6 +7,7 @@ from typing import Dict, Any
 from .manager import lib_logger
 from ..utils.json_utils import json_loads, json_deep_copy
 from ..batched_persistence import UsagePersistenceManager
+from ..utils.resilient_io import BufferedWriteRegistry
 import asyncio
 import aiofiles
 import json
@@ -125,7 +126,9 @@ class UsageManagerPersistenceMixin:
             self._batch_persistence = None
             return
 
-        await asyncio.to_thread(self._state_writer.shutdown)
+        if self._state_writer.current_state is not None:
+            await self._state_writer.retry_if_needed()
+        await asyncio.to_thread(BufferedWriteRegistry.get_instance().flush_all)
 
 
 

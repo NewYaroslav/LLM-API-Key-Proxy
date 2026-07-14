@@ -148,7 +148,7 @@ class MinimaxAnthropicStreamingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             json_loads(args_delta),
-            {"file_path": "e:\\repo\\note.md", "limit": 25},
+            {"file_path": "e:\\repo\\note.md", "limit": "25"},
         )
 
         stop_reason = next(
@@ -251,7 +251,7 @@ class MinimaxAnthropicStreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["content"][1]["name"], "Read")
         self.assertEqual(
             response["content"][1]["input"],
-            {"file_path": "e:\\repo\\note.md", "limit": 25},
+            {"file_path": "e:\\repo\\note.md", "limit": "25"},
         )
 
 

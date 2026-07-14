@@ -135,24 +135,9 @@ def _strip_minimax_separators(text: str) -> str:
 
 
 def _coerce_tool_value(value: str) -> Any:
-    stripped = value.strip()
-    lowered = stripped.lower()
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    if lowered == "null":
-        return None
-    if re.fullmatch(r"-?\d+", stripped):
-        try:
-            return int(stripped)
-        except ValueError:
-            return value
-    if re.fullmatch(r"-?\d+\.\d+", stripped):
-        try:
-            return float(stripped)
-        except ValueError:
-            return value
+    # Minimax text-form tool calls do not include the original JSON Schema, so
+    # heuristic coercion can corrupt string IDs, leading zero codes, and string
+    # flags such as "true" or "null". Preserve values as strings.
     return value
 
 

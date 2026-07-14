@@ -521,6 +521,25 @@ def anthropic_to_openai_tool_choice(
     return "auto"
 
 
+def _openai_tool_call_to_anthropic_block(tc: Dict[str, Any]) -> Dict[str, Any]:
+    func: Dict[str, Any] = tc.get("function", {})
+    try:
+        input_data: Any = _json_loads(func.get("arguments", "{}"))
+    except _json_decode_error:
+        input_data = {}
+
+    tc_id = tc.get("id")
+    if tc_id is None:
+        tc_id = f"toolu_{uuid.uuid4().hex[:12]}"
+
+    return {
+        "type": "tool_use",
+        "id": tc_id,
+        "name": func.get("name", ""),
+        "input": input_data,
+    }
+
+
 def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model: str) -> Dict[str, Any]:
     """
     Convert OpenAI chat completion response to Anthropic Messages format.
@@ -557,7 +576,7 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model
             }
         )
 
-    recovered_tool_calls: List[Dict[str, Any]] = []
+    recovered_tool_call_seen = False
 
     # Add text content if present
     text_content: Optional[str] = message.get("content")
@@ -574,7 +593,8 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model
                             content_blocks.append({"type": "thinking", "thinking": sub_text})
                         else:
                             content_blocks.append({"type": "text", "text": sub_text})
-                    recovered_tool_calls.append(value)
+                    content_blocks.append(_openai_tool_call_to_anthropic_block(value))
+                    recovered_tool_call_seen = True
                     continue
                 for sub_field, sub_text in think_parser.feed(value):
                     if not sub_text:
@@ -602,27 +622,10 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model
         else:
             content_blocks.append({"type": "text", "text": text_content})
 
-    # Add tool use blocks if present
-    tool_calls: List[Dict[str, Any]] = (message.get("tool_calls") or []) + recovered_tool_calls
+    # Add structured tool use blocks if present.
+    tool_calls: List[Dict[str, Any]] = message.get("tool_calls") or []
     for tc in tool_calls:
-        func: Dict[str, Any] = tc.get("function", {})
-        try:
-            input_data: Any = _json_loads(func.get("arguments", "{}"))
-        except _json_decode_error:
-            input_data = {}
-
-        tc_id = tc.get("id")
-        if tc_id is None:
-            tc_id = f"toolu_{uuid.uuid4().hex[:12]}"
-
-        content_blocks.append(
-            {
-                "type": "tool_use",
-                "id": tc_id,
-                "name": func.get("name", ""),
-                "input": input_data,
-            }
-        )
+        content_blocks.append(_openai_tool_call_to_anthropic_block(tc))
 
     # Map finish_reason to stop_reason
     finish_reason: str = choice.get("finish_reason", "end_turn")
@@ -633,7 +636,11 @@ def openai_to_anthropic_response(openai_response: Dict[str, Any], original_model
         "content_filter": "end_turn",
         "function_call": "tool_use",
     }
-    stop_reason: str = "tool_use" if recovered_tool_calls else stop_reason_map.get(finish_reason, "end_turn")
+    stop_reason: str = (
+        "tool_use"
+        if recovered_tool_call_seen or tool_calls
+        else stop_reason_map.get(finish_reason, "end_turn")
+    )
 
     # Build usage
     # Note: Google's promptTokenCount INCLUDES cached tokens, but Anthropic's

@@ -223,21 +223,14 @@ def get_context_window(model: str, registry=None) -> Optional[int]:
 
 
 def _estimate_text_tokens(text: str) -> int:
-    """Fast local token estimate used when exact tokenizers are too expensive."""
+    """Fast conservative token upper estimate for large payloads."""
     if not text:
         return 0
 
-    ascii_chars = 0
-    non_ascii_chars = 0
-    for ch in text:
-        if ord(ch) < 128:
-            ascii_chars += 1
-        else:
-            non_ascii_chars += 1
-
-    # ASCII text is usually ~4 chars/token; non-ASCII often trends closer to
-    # 1 char/token. This intentionally errs on the conservative side.
-    return max(1, (ascii_chars + 3) // 4 + non_ascii_chars)
+    # Exact tokenizers can be too slow on very large contexts. Byte length is
+    # intentionally conservative for byte/BPE-style tokenizers and avoids
+    # undercounting dense code, JSON, random IDs, and Unicode byte fallbacks.
+    return max(1, len(text.encode("utf-8")))
 
 
 def _estimate_value_tokens(value: Any) -> tuple[int, int]:
@@ -276,7 +269,7 @@ def estimate_input_tokens(
     tools: Optional[list] = None,
     tool_choice: Optional[Any] = None,
 ) -> tuple[int, int]:
-    """Cheap token estimate for request sizing.
+    """Cheap conservative token estimate for request sizing.
 
     Returns:
         Tuple of (estimated_tokens, estimated_chars).

@@ -179,12 +179,9 @@ async def _safe_close_async(coro_fn, label: str, timeout: float | None = None) -
         logger.exception("Error closing %s: %s", label, e)
 
 
-def _safe_close_sync(close_fn, label: str) -> None:
-    """Safely call a sync close method, logging errors without propagating."""
-    try:
-        close_fn()
-    except Exception as e:
-        logger.exception("Error closing %s: %s", label, e)
+async def _safe_close_sync(close_fn, label: str, timeout: float | None = None) -> None:
+    """Safely call a sync close method off the event loop."""
+    await _safe_await(asyncio.to_thread(close_fn), label, timeout=timeout)
 
 
 # --- Lifespan factory ---
@@ -560,8 +557,8 @@ def create_lifespan(config: LifespanConfig) -> Callable[[FastAPI], AsyncContextM
             await _safe_await(
                 client.background_refresher.stop(), "background refresher"
             )
-            _safe_close_sync(close_doh_client, "DoH client")
-            _safe_close_sync(close_dns_executor, "DNS executor")
+            await _safe_close_sync(close_doh_client, "DoH client")
+            await _safe_close_sync(close_dns_executor, "DNS executor")
             if app.state.embedding_batcher:
                 await _safe_await(
                     app.state.embedding_batcher.stop(), "embedding batcher"
@@ -589,7 +586,7 @@ def create_lifespan(config: LifespanConfig) -> Callable[[FastAPI], AsyncContextM
                             if hasattr(_obj, "aclose"):
                                 await _safe_close_async(_obj.aclose, f"custom_httpx.{_attr}")
                             elif hasattr(_obj, "close"):
-                                _safe_close_sync(_obj.close, f"custom_httpx.{_attr}")
+                                await _safe_close_sync(_obj.close, f"custom_httpx.{_attr}")
                     _custom_httpx.httpx_handler = None
             except asyncio.CancelledError:
                 raise
@@ -607,7 +604,7 @@ def create_lifespan(config: LifespanConfig) -> Callable[[FastAPI], AsyncContextM
                 hasattr(litellm, "client_session")
                 and litellm.client_session is not None
             ):
-                _safe_close_sync(litellm.client_session.close, "litellm client_session")
+                await _safe_close_sync(litellm.client_session.close, "litellm client_session")
                 litellm.client_session = None
 
             # Stop model info service
