@@ -3,6 +3,7 @@
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 _IMPORT_PATCHES_APPLIED = False
@@ -10,9 +11,31 @@ _LITELLM_RUNTIME_CONFIGURED = False
 _AIOHTTP_PATCHED_INIT = None
 
 
+def _seed_windows_platform_uname() -> None:
+    """Avoid Python 3.14 platform.system() WMI hangs during aiohttp import."""
+    if sys.platform != "win32":
+        return
+
+    import platform
+
+    if getattr(platform, "_uname_cache", None) is not None:
+        return
+
+    winver = sys.getwindowsversion()
+    platform._uname_cache = platform.uname_result(  # type: ignore[attr-defined]
+        "Windows",
+        os.environ.get("COMPUTERNAME", ""),
+        f"{winver.major}.{winver.minor}",
+        f"{winver.major}.{winver.minor}.{winver.build}",
+        os.environ.get("PROCESSOR_ARCHITECTURE", ""),
+    )
+
+
 def apply_import_time_patches() -> None:
     """Apply monkey-patches that must run before importing litellm/aiohttp users."""
     global _AIOHTTP_PATCHED_INIT, _IMPORT_PATCHES_APPLIED
+
+    _seed_windows_platform_uname()
 
     if _IMPORT_PATCHES_APPLIED:
         try:

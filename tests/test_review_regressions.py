@@ -68,6 +68,33 @@ class UsageManagerCloseTests(unittest.IsolatedAsyncioTestCase):
             await manager.close()
 
 
+class WindowsPlatformSeedTests(unittest.TestCase):
+    def test_windows_platform_uname_seed_is_idempotent(self):
+        import platform
+        import sys
+
+        from rotator_library.client import bootstrap
+
+        if sys.platform != "win32":
+            bootstrap._seed_windows_platform_uname()
+            return
+
+        original_cache = getattr(platform, "_uname_cache", None)
+        try:
+            platform._uname_cache = None
+
+            bootstrap._seed_windows_platform_uname()
+            seeded_cache = getattr(platform, "_uname_cache", None)
+
+            self.assertIsNotNone(seeded_cache)
+            self.assertEqual(seeded_cache.system, "Windows")
+
+            bootstrap._seed_windows_platform_uname()
+            self.assertIs(getattr(platform, "_uname_cache", None), seeded_cache)
+        finally:
+            platform._uname_cache = original_cache
+
+
 class TokenEstimateTests(unittest.TestCase):
     def test_estimate_is_reasonably_close_for_common_payloads(self):
         samples = [

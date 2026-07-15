@@ -13,6 +13,30 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
+def _seed_windows_platform_uname() -> None:
+    """Avoid Python 3.14 platform.system() WMI hangs during aiohttp import."""
+    if sys.platform != "win32":
+        return
+
+    import os
+    import platform
+
+    if getattr(platform, "_uname_cache", None) is not None:
+        return
+
+    winver = sys.getwindowsversion()
+    platform._uname_cache = platform.uname_result(  # type: ignore[attr-defined]
+        "Windows",
+        os.environ.get("COMPUTERNAME", ""),
+        f"{winver.major}.{winver.minor}",
+        f"{winver.major}.{winver.minor}.{winver.build}",
+        os.environ.get("PROCESSOR_ARCHITECTURE", ""),
+    )
+
+
+_seed_windows_platform_uname()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
