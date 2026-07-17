@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 
 echo ========================================
 echo LLM API Key Proxy - Запуск
@@ -47,6 +47,34 @@ if exist ".venv\Scripts\activate.bat" (
 echo.
 if "%PROXY_HOST%"=="" set PROXY_HOST=127.0.0.1
 if "%PROXY_PORT%"=="" set PROXY_PORT=8000
+
+set "LISTEN_PID="
+for /f "tokens=5" %%P in ('netstat -ano -p tcp ^| findstr /R /C:":%PROXY_PORT% .*LISTENING"') do (
+    set "LISTEN_PID=%%P"
+)
+
+if defined LISTEN_PID (
+    echo.
+    echo Port %PROXY_PORT% is already in use by PID !LISTEN_PID!.
+    tasklist /FI "PID eq !LISTEN_PID!"
+    echo.
+    echo This usually means the previous proxy process did not exit cleanly.
+    set /p STOP_OLD_PROXY=Stop this process and start a fresh proxy? [y/N]:
+    if /I "!STOP_OLD_PROXY!"=="Y" (
+        echo Stopping PID !LISTEN_PID!...
+        taskkill /PID !LISTEN_PID! /T /F
+        if errorlevel 1 (
+            echo Failed to stop PID !LISTEN_PID!. Please close it manually.
+            pause
+            exit /b 1
+        )
+        timeout /t 2 /nobreak >nul
+    ) else (
+        echo Existing process left running. Startup cancelled.
+        pause
+        exit /b 1
+    )
+)
 
 echo Запуск прокси-сервера на http://%PROXY_HOST%:%PROXY_PORT%
 echo.
